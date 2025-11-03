@@ -1,4 +1,3 @@
-
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include <string.h>
@@ -1240,6 +1239,53 @@ __global__ void find_hash_kernel(
     uint8_t is_odd = public_key.y.data[0] & 1;
 
     // Panggil fungsi yang paling efisien dan dioptimalkan dari pustaka Anda
+    _GetHash160Comp((uint64_t*)public_key.x.data, is_odd, final_hash160);
+
+    // 4. PERBANDINGAN
+    for (int i = 0; i < num_targets; i++) {
+        if (device_memcmp(final_hash160, &d_targets[i * 20], 20)) {
+            if (atomicCAS(d_found_flag, 0, 1) == 0) {
+                copy_bigint(d_result, &current_priv);
+            }
+            return;
+        }
+    }
+}
+
+// ===================================================================
+// KERNEL UNTUK MULTI-GPU
+// ===================================================================
+
+__global__ void find_hash_kernel_multi_gpu(
+    const BigInt* start_key, unsigned long long keys_per_launch, const BigInt* step,
+    const uint8_t* d_targets, int num_targets,
+    BigInt* d_result, int* d_found_flag,
+    int gpu_id, int total_gpus
+) {
+    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= keys_per_launch || *d_found_flag) return;
+
+    // Hitung offset berdasarkan GPU ID untuk work distribution
+    unsigned long long global_idx = idx * total_gpus + gpu_id;
+    
+    // 1. HITUNG PRIVATE KEY
+    BigInt current_priv;
+    BigInt priv_idx_mul_step;
+    bigint_mul_uint32(&priv_idx_mul_step, step, (uint32_t)global_idx);
+    ptx_u256Add(&current_priv, start_key, &priv_idx_mul_step);
+    scalar_mod_n(&current_priv, &current_priv);
+
+    // 2. PUBLIC KEY DENGAN PRECOMPUTED MULTIPLICATION
+    ECPointJac result_jac;
+    scalar_multiply_jac_precomputed(&result_jac, &current_priv);
+
+    // 3. KONVERSI KE AFFINE DAN HASHING
+    ECPoint public_key;
+    jacobian_to_affine(&public_key, &result_jac);
+    if (public_key.infinity) return;
+
+    uint8_t final_hash160[20];
+    uint8_t is_odd = public_key.y.data[0] & 1;
     _GetHash160Comp((uint64_t*)public_key.x.data, is_odd, final_hash160);
 
     // 4. PERBANDINGAN
