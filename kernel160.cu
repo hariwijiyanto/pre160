@@ -405,28 +405,48 @@ __device__ void scalar_multiply_jac_device(ECPointJac *result, const ECPointJac 
 // ===================================================================
 // PRECOMPUTATION FUNCTIONS
 // ===================================================================
+#define WINDOW_BITS 4
+#define WINDOW_SIZE (1 << WINDOW_BITS)
+#define NUM_WINDOWS ((BIGINT_WORDS*32 + WINDOW_BITS - 1) / WINDOW_BITS)
+
+__device__ ECPointJac precomp_table[NUM_WINDOWS * WINDOW_SIZE];
+
 extern "C"
 __global__ void precompute_G_table_kernel() {
     int idx = threadIdx.x;
     if (idx == 0) {
-        ECPointJac current = const_G_jacobian;
-        point_copy_jac(&const_G_table[0], &current);  // Simpan G (2^0 * G)
-
-        // Precompute 2^i * G untuk i=1 sampai 255
-        for (int i = 1; i < 256; i++) {
-            double_point_jac(&current, &current);
-            point_copy_jac(&const_G_table[i], &current);
+        ECPointJac base;
+        point_copy_jac(&base, &const_G_jacobian);
+        for (int w = 0; w < NUM_WINDOWS; ++w) {
+            ECPointJac shifted;
+            point_copy_jac(&shifted, &base);
+            for (int v = 0; v < WINDOW_SIZE; ++v) {
+                if (v == 0) {
+                    point_set_infinity_jac(&precomp_table[w * WINDOW_SIZE + v]);
+                } else {
+                    ECPointJac out;
+                    point_set_infinity_jac(&out);
+                    for (int t = 0; t < v; ++t) add_point_jac(&out, &out, &shifted);
+                    point_copy_jac(&precomp_table[w * WINDOW_SIZE + v], &out);
+                }
+            }
+            for (int d = 0; d < WINDOW_BITS; ++d) double_point_jac(&base, &base);
         }
     }
 }
 
 __device__ void scalar_multiply_jac_precomputed(ECPointJac *result, const BigInt *scalar) {
     point_set_infinity_jac(result);
-
-    for (int i = 0; i < 256; i++) {
-        if (get_bit(scalar, i)) {
-            add_point_jac(result, result, &const_G_table[i]);
-        }
+    for (int w = NUM_WINDOWS - 1; w >= 0; --w) {
+        for (int d = 0; d < WINDOW_BITS; ++d) double_point_jac(result, result);
+        int bitpos = w * WINDOW_BITS;
+        int word_idx = bitpos >> 5;
+        int bit_off = bitpos & 31;
+        unsigned int acc = 0;
+        if (word_idx < BIGINT_WORDS) acc = scalar->data[word_idx];
+        if (word_idx + 1 < BIGINT_WORDS) acc |= ((unsigned int)scalar->data[word_idx + 1]) << 32;
+        int nibble = (acc >> bit_off) & (WINDOW_SIZE - 1);
+        if (nibble) add_point_jac(result, result, &precomp_table[w * WINDOW_SIZE + nibble]);
     }
 }
 
