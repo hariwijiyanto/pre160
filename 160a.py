@@ -104,8 +104,7 @@ def main():
             s = streams[total_keys_checked % len(streams)]
             found_flag_host[0] = 0
             cuda.memcpy_htod_async(d_found_flag, found_flag_host, stream=s)
-            find_hash_kernel.prepare("PPPIPPI")
-            find_hash_kernel.prepared_call((grid_size,1,1),(block_size,1,1), d_start, np.uint64(keys_this_launch), step_buf, d_targets, np.int32(num_targets), d_result, d_found_flag, stream=s)
+            find_hash_kernel(d_start, np.uint64(keys_this_launch), step_buf, d_targets, np.int32(num_targets), d_result, d_found_flag, block=(block_size,1,1), grid=(grid_size,1,1), stream=s)
             cuda.memcpy_dtoh_async(found_flag_host, d_found_flag, stream=s)
             s.synchronize()
             if found_flag_host[0] != 0:
