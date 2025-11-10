@@ -125,47 +125,53 @@ def main():
         args.keys_per_launch = 1<<20
 
     d_start = cuda.mem_alloc(int_to_bigint_np(0).nbytes)
-    cuda.memcpy_htod(d_start, int_to_bigint_np(current_start))
+cuda.memcpy_htod(d_start, int_to_bigint_np(current_start))
 
-    try:
-        while found_flag_host[0] == 0 and current_start <= current_end:
-            keys_left = (current_end - current_start) // args.step + 1
-            keys_this_launch = min(args.keys_per_launch, keys_left)
-            if keys_this_launch <= 0: break
-            grid_size = (keys_this_launch + block_size - 1) // block_size
-            start_key_np = int_to_bigint_np(current_start)
-            cuda.memcpy_htod_async(d_start, start_key_np, stream=streams[0])
-            s = streams[total_keys_checked % len(streams)]
+heartbeat_interval = 5
+iters = 0
 
-            found_flag_host[0] = 0
-            cuda.memcpy_htod_async(d_found_flag, found_flag_host, stream=s)
+try:
+    while current_start <= current_end:
+        keys_left = ((current_end - current_start) // max(1, args.step)) + 1
+        if keys_left <= 0:
+            break
+        keys_this_launch = min(args.keys_per_launch, keys_left)
+        grid_size = (keys_this_launch + block_size - 1) // block_size
 
-            evt_start = cuda.Event(); evt_after_kernel = cuda.Event(); evt_after_copy = cuda.Event()
-            evt_start.record(stream=s)
+        start_key_np = int_to_bigint_np(current_start)
+        cuda.memcpy_htod_async(d_start, start_key_np, stream=streams[0])
+        s = streams[total_keys_checked % len(streams)]
 
-            find_hash_kernel(d_start, np.uint64(keys_this_launch), step_buf, d_targets, np.int32(num_targets), d_result, d_found_flag, block=(block_size,1,1), grid=(grid_size,1,1), stream=s)
+        found_flag_host[0] = 0
+        cuda.memcpy_htod_async(d_found_flag, found_flag_host, stream=s)
 
-            evt_after_kernel.record(stream=s)
-            cuda.memcpy_dtoh_async(found_flag_host, d_found_flag, stream=s)
-            evt_after_copy.record(stream=s)
-            s.synchronize()
+        evt_start = cuda.Event(); evt_after_kernel = cuda.Event(); evt_after_copy = cuda.Event()
+        evt_start.record(stream=s)
 
-            t_kernel = evt_start.time_till(evt_after_kernel) / 1000.0
-            t_copy = evt_after_kernel.time_till(evt_after_copy) / 1000.0
-            t_batch = t_kernel + t_copy
+        find_hash_kernel(d_start, np.uint64(keys_this_launch), step_buf, d_targets, np.int32(num_targets), d_result, d_found_flag, block=(block_size,1,1), grid=(grid_size,1,1), stream=s)
 
-            total_keys_checked += keys_this_launch
-            elapsed = time.time() - start_time
-            batch_keys = total_keys_checked - last_total
-            last_total = total_keys_checked
+        evt_after_kernel.record(stream=s)
+        cuda.memcpy_dtoh_async(found_flag_host, d_found_flag, stream=s)
+        evt_after_copy.record(stream=s)
+        s.synchronize()
 
-            free_mem, total_mem = cuda.mem_get_info()
-            eta_seconds = (current_end - current_start) / max(1e-9, (total_keys_checked / max(1e-9, elapsed))) if total_keys_checked>0 else float('inf')
+        t_kernel = evt_start.time_till(evt_after_kernel) / 1000.0
+        t_copy = evt_after_kernel.time_till(evt_after_copy) / 1000.0
+        t_batch = t_kernel + t_copy
 
+        total_keys_checked += keys_this_launch
+        elapsed = time.time() - start_time
+        batch_keys = keys_this_launch
+        iters += 1
+
+        free_mem, total_mem = cuda.mem_get_info()
+        avg_kps = total_keys_checked / max(1e-9, elapsed)
+        eta_seconds = ((current_end - current_start) // max(1, args.step) + 1) / max(1e-9, avg_kps)
+
+        if iters % heartbeat_interval == 0:
             line = (
-                f"Total:{total_keys_checked:,} | "
-                f"Elapsed:{elapsed:.2f}s | "
-                f"Rate:{format_rate(total_keys_checked, elapsed)} | "
+                f"Iter:{iters} | Total:{total_keys_checked:,} | "
+                f"Elapsed:{elapsed:.2f}s | Rate:{format_rate(total_keys_checked, elapsed)} | "
                 f"Batch:{batch_keys:,} in {t_batch:.3f}s (kernel {t_kernel:.3f}s copy {t_copy:.3f}s) | "
                 f"FreeMem:{int(free_mem/1024/1024):,}MB/{int(total_mem/1024/1024):,}MB | "
                 f"ETA:{secs_to_hms(eta_seconds)}"
@@ -173,16 +179,21 @@ def main():
             sys.stdout.write("\r" + line + " " * 10)
             sys.stdout.flush()
 
-            if found_flag_host[0] != 0:
-                cuda.memcpy_dtoh(result_host, d_result)
-                priv_hex = words32_to_hex(result_host)
-                print("\nFOUND privkey:", priv_hex)
-                break
+        if found_flag_host[0] != 0:
+            cuda.memcpy_dtoh(result_host, d_result)
+            priv_hex = words32_to_hex(result_host)
+            print("\nFOUND privkey:", priv_hex)
+            break
 
-            current_start += keys_this_launch * args.step
-        print()
-    except KeyboardInterrupt:
-        pass
+        # advance current_start safely (use Python int arithmetic)
+        current_start = current_start + keys_this_launch * args.step
+
+    # final summary
+    elapsed = time.time() - start_time
+    print("\nDone. Total keys:", f"{total_keys_checked:,}", "Elapsed:", f"{elapsed:.2f}s", "Avg rate:", format_rate(total_keys_checked, elapsed))
+except KeyboardInterrupt:
+    print("\nInterrupted by user. Keys checked:", total_keys_checked)
+        
 
 if __name__ == '__main__':
     main()
