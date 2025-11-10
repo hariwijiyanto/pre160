@@ -443,9 +443,10 @@ __device__ void scalar_multiply_jac_precomputed(ECPointJac *result, const BigInt
         int bitpos = w * WINDOW_BITS;
         int word_idx = bitpos >> 5;
         int bit_off = bitpos & 31;
-        unsigned int acc = 0;
-        if (word_idx < BIGINT_WORDS) acc = scalar->data[word_idx];
-        if (word_idx + 1 < BIGINT_WORDS) acc |= ((unsigned int)scalar->data[word_idx + 1]) << 32;
+        unsigned long long acc = 0ULL;
+        if (word_idx < BIGINT_WORDS) acc = (unsigned long long)scalar->data[word_idx];
+        if (word_idx + 1 < BIGINT_WORDS) acc |= ((unsigned long long)scalar->data[word_idx + 1]) << 32ULL;
+
         int nibble = (acc >> bit_off) & (WINDOW_SIZE - 1);
         if (nibble) add_point_jac(result, result, &precomp_table[w * WINDOW_SIZE + nibble]);
     }
